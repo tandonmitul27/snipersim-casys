@@ -11,6 +11,7 @@
 #include "stats.h"
 #include "timer.h"
 #include "thread.h"
+#include "memory_manager_base.h"
 
 MagicServer::MagicServer()
       : m_performance_enabled(false)
@@ -86,6 +87,40 @@ UInt64 MagicServer::Magic_unlocked(thread_id_t thread_id, core_id_t core_id, UIn
       }
       case SIM_CMD_MARKER:
       {
+#if defined(ENABLE_KV_BYPASS) || defined(ENABLE_KV_PINNING)
+         // KV-cache range announcements:
+         //   0xBEEF0001 = start addr (bypass + pinning)
+         //   0xBEEF0002 = size + activate bypass + pinning
+         //   0xBEEF0003 = start addr (pinning only)
+         //   0xBEEF0004 = size + activate pinning only (no bypass)
+         if (arg0 == 0xBEEF0001 || arg0 == 0xBEEF0002 ||
+             arg0 == 0xBEEF0003 || arg0 == 0xBEEF0004)
+         {
+            Core *core = Sim()->getCoreManager()->getCoreFromID(core_id);
+            MemoryManagerBase *mm = core->getMemoryManager();
+            if (arg0 == 0xBEEF0001 || arg0 == 0xBEEF0003)
+            {
+               // arg1 is a virtual address; translate to physical so isKVCacheAddr()
+               // matches the physical addresses used by the cache hierarchy.
+               Thread* kv_thread = Sim()->getThreadManager()->getThreadFromID(thread_id);
+               IntPtr pa_start = (IntPtr)kv_thread->va2pa((UInt64)arg1);
+               mm->setKVCacheStart(pa_start);
+            }
+            else if (arg0 == 0xBEEF0002)
+            {
+               mm->setKVCacheSize((size_t)arg1);
+               mm->enableKVCachePolicy();
+            }
+
+#ifdef ENABLE_KV_PINNING
+            else  // 0xBEEF0004
+            {
+               mm->setKVCacheSize((size_t)arg1);
+               mm->enableKVPinningOnly();
+            }
+#endif
+         }
+#endif
          MagicMarkerType args = { thread_id: thread_id, core_id: core_id, arg0: arg0, arg1: arg1, str: NULL };
          Sim()->getHooksManager()->callHooks(HookType::HOOK_MAGIC_MARKER, (UInt64)&args);
          return 0;

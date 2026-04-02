@@ -57,10 +57,12 @@ class Cache : public CacheBase
             access_t access_type, Byte* buff, UInt32 bytes, SubsecondTime now, bool update_replacement);
       void insertSingleLine(IntPtr addr, Byte* fill_buff,
             bool* eviction, IntPtr* evict_addr,
-            CacheBlockInfo* evict_block_info, Byte* evict_buff, SubsecondTime now, CacheCntlr *cntlr = NULL);
+            CacheBlockInfo* evict_block_info, Byte* evict_buff, SubsecondTime now, CacheCntlr *cntlr = NULL,
+            bool is_kv_line = false);
       CacheBlockInfo* peekSingleLine(IntPtr addr);
 
       CacheBlockInfo* peekBlock(UInt32 set_index, UInt32 way) const { return m_sets[set_index]->peekBlock(way); }
+      CacheSet* getSet(UInt32 set_index) const { return m_sets[set_index]; }
 
       // Update Cache Counters
       void updateCounters(bool cache_hit);

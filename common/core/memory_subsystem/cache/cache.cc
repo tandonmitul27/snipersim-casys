@@ -123,7 +123,7 @@ void
 Cache::insertSingleLine(IntPtr addr, Byte* fill_buff,
       bool* eviction, IntPtr* evict_addr,
       CacheBlockInfo* evict_block_info, Byte* evict_buff,
-      SubsecondTime now, CacheCntlr *cntlr)
+      SubsecondTime now, CacheCntlr *cntlr, bool is_kv_line)
 {
    IntPtr tag;
    UInt32 set_index;
@@ -131,6 +131,10 @@ Cache::insertSingleLine(IntPtr addr, Byte* fill_buff,
 
    CacheBlockInfo* cache_block_info = CacheBlockInfo::create(m_cache_type);
    cache_block_info->setTag(tag);
+#ifdef ENABLE_KV_PINNING
+   if (is_kv_line)
+      cache_block_info->setKVCacheLine(true);
+#endif
 
    m_sets[set_index]->insert(cache_block_info, fill_buff,
          eviction, evict_block_info, evict_buff, cntlr);

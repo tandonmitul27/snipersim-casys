@@ -54,5 +54,6 @@ env -i \
 
 echo ""
 echo "[BENCH] Results saved to: $OUTDIR"
+python3 "$SCRIPT_DIR/tools/dump_stats.py" "$OUTDIR"
 echo "[BENCH] Files:"
 ls "$OUTDIR"

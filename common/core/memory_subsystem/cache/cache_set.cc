@@ -16,6 +16,9 @@
 CacheSet::CacheSet(CacheBase::cache_t cache_type,
       UInt32 associativity, UInt32 blocksize):
       m_associativity(associativity), m_blocksize(blocksize)
+#ifdef ENABLE_KV_PINNING
+      , m_num_kv_reserved_ways(0)
+#endif
 {
    m_cache_block_info_array = new CacheBlockInfo*[m_associativity];
    for (UInt32 i = 0; i < m_associativity; i++)
@@ -98,9 +101,14 @@ CacheSet::invalidate(IntPtr& tag)
 void
 CacheSet::insert(CacheBlockInfo* cache_block_info, Byte* fill_buff, bool* eviction, CacheBlockInfo* evict_block_info, Byte* evict_buff, CacheCntlr *cntlr)
 {
-   // This replacement strategy does not take into account the fact that
-   // cache blocks can be voluntarily flushed or invalidated due to another write request
+#ifdef ENABLE_KV_PINNING
+   // Route KV-cache lines to the reserved ways, regular lines to the non-reserved ways.
+   const UInt32 index = (cache_block_info->isKVCacheLine() && m_num_kv_reserved_ways > 0)
+                        ? getKVReplacementIndex(cntlr)
+                        : getReplacementIndex(cntlr);
+#else
    const UInt32 index = getReplacementIndex(cntlr);
+#endif
    assert(index < m_associativity);
 
    assert(eviction != NULL);

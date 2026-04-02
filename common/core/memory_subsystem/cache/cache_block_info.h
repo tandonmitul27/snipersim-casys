@@ -26,6 +26,9 @@ class CacheBlockInfo
       UInt64 m_owner;
       BitsUsedType m_used;
       UInt8 m_options;  // large enough to hold a bitfield for all available option_t's
+#ifdef ENABLE_KV_PINNING
+      bool m_is_kv_cache;  // true when this line belongs to the KV-cache reserved region
+#endif
 
       static const char* option_names[];
 
@@ -60,6 +63,14 @@ class CacheBlockInfo
       bool updateUsage(BitsUsedType used);
 
       static const char* getOptionName(option_t option);
+
+#ifdef ENABLE_KV_PINNING
+      bool isKVCacheLine() const { return m_is_kv_cache; }
+      void setKVCacheLine(bool v) { m_is_kv_cache = v; }
+#else
+      bool isKVCacheLine() const { return false; }
+      void setKVCacheLine(bool) {}
+#endif
 };
 
 class CacheCntlr

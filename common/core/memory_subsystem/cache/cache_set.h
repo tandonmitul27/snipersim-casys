@@ -34,6 +34,9 @@ class CacheSet
       UInt32 m_associativity;
       UInt32 m_blocksize;
       Lock m_lock;
+#ifdef ENABLE_KV_PINNING
+      UInt32 m_num_kv_reserved_ways;  // ways [0, N) reserved for KV-cache lines (0 = disabled)
+#endif
 
    public:
 
@@ -57,9 +60,17 @@ class CacheSet
       UInt32 getBlockSize(void) const { return m_blocksize; }
 
       virtual UInt32 getReplacementIndex(CacheCntlr *cntlr) = 0;
+#ifdef ENABLE_KV_PINNING
+      virtual UInt32 getKVReplacementIndex(CacheCntlr *cntlr) { return getReplacementIndex(cntlr); }
+#endif
       virtual void updateReplacementIndex(UInt32) = 0;
 
       bool isValidReplacement(UInt32 index);
+
+#ifdef ENABLE_KV_PINNING
+      void setKVReservedWays(UInt32 n) { m_num_kv_reserved_ways = n; }
+      UInt32 getNumKVReservedWays() const { return m_num_kv_reserved_ways; }
+#endif
 };
 
 #endif /* CACHE_SET_H */

@@ -85,6 +85,16 @@ class MemoryManagerBase
       virtual void enableModels() = 0;
       virtual void disableModels() = 0;
 
+#if defined(ENABLE_KV_BYPASS) || defined(ENABLE_KV_PINNING)
+      // KV-cache range hooks — shared by bypass and pinning
+      virtual void setKVCacheStart(IntPtr) {}
+      virtual void setKVCacheSize(size_t) {}
+      virtual void enableKVCachePolicy() {}   // bypass + pinning
+#endif
+#ifdef ENABLE_KV_PINNING
+      virtual void enableKVPinningOnly() {}   // pinning only, no bypass
+#endif
+
       // Modeling
       virtual UInt32 getModeledLength(const void* pkt_data) = 0;
 

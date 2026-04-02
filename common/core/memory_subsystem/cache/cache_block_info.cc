@@ -27,6 +27,9 @@ CacheBlockInfo::CacheBlockInfo(IntPtr tag, CacheState::cstate_t cstate, UInt64 o
    m_owner(0),
    m_used(0),
    m_options(options)
+#ifdef ENABLE_KV_PINNING
+   , m_is_kv_cache(false)
+#endif
 {}
 
 CacheBlockInfo::~CacheBlockInfo()
@@ -57,6 +60,9 @@ CacheBlockInfo::invalidate()
 {
    m_tag = ~0;
    m_cstate = CacheState::INVALID;
+#ifdef ENABLE_KV_PINNING
+   m_is_kv_cache = false;
+#endif
 }
 
 void
@@ -67,6 +73,9 @@ CacheBlockInfo::clone(CacheBlockInfo* cache_block_info)
    m_owner = cache_block_info->m_owner;
    m_used = cache_block_info->m_used;
    m_options = cache_block_info->m_options;
+#ifdef ENABLE_KV_PINNING
+   m_is_kv_cache = cache_block_info->m_is_kv_cache;
+#endif
 }
 
 bool

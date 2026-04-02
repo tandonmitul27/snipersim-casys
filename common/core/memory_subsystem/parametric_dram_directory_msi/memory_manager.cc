@@ -12,6 +12,8 @@
 #include "config.hpp"
 #include "distribution.h"
 #include "topology_info.h"
+#include "stats.h"
+#include "stats.h"
 
 #include <algorithm>
 
@@ -30,6 +32,13 @@ namespace ParametricDramDirectoryMSI
 
 std::map<CoreComponentType, CacheCntlr*> MemoryManager::m_all_cache_cntlrs;
 
+#if defined(ENABLE_KV_BYPASS) || defined(ENABLE_KV_PINNING)
+// Static member initialization — global KV cache range shared by all cores
+IntPtr MemoryManager::s_kv_cache_start = 0;
+size_t MemoryManager::s_kv_cache_size  = 0;
+bool   MemoryManager::s_kv_policy_active = false;
+#endif
+
 MemoryManager::MemoryManager(Core* core,
       Network* network, ShmemPerfModel* shmem_perf_model):
    MemoryManagerBase(core, network, shmem_perf_model),
@@ -43,6 +52,14 @@ MemoryManager::MemoryManager(Core* core,
    m_tag_directory_present(false),
    m_dram_cntlr_present(false),
    m_enabled(false)
+#if defined(ENABLE_KV_BYPASS) || defined(ENABLE_KV_PINNING)
+   , m_kv_marker_start_calls(0)
+   , m_kv_marker_size_calls(0)
+   , m_kv_enable_policy_calls(0)
+   , m_kv_enable_pinning_only_calls(0)
+   , m_kv_is_addr_calls(0)
+   , m_kv_is_addr_hits(0)
+#endif
 {
    // Read Parameters from the Config file
    std::map<MemComponent::component_t, CacheParameters> cache_parameters;
@@ -373,6 +390,15 @@ MemoryManager::MemoryManager(Core* core,
 
    // Set up core topology information
    getCore()->getTopologyInfo()->setup(smt_cores, cache_parameters[m_last_level_cache].shared_cores);
+
+#if defined(ENABLE_KV_BYPASS) || defined(ENABLE_KV_PINNING)
+   registerStatsMetric("kv-debug", getCore()->getId(), "kv-marker-start-calls", &m_kv_marker_start_calls);
+   registerStatsMetric("kv-debug", getCore()->getId(), "kv-marker-size-calls", &m_kv_marker_size_calls);
+   registerStatsMetric("kv-debug", getCore()->getId(), "kv-enable-policy-calls", &m_kv_enable_policy_calls);
+   registerStatsMetric("kv-debug", getCore()->getId(), "kv-enable-pinning-only-calls", &m_kv_enable_pinning_only_calls);
+   registerStatsMetric("kv-debug", getCore()->getId(), "kv-is-addr-calls", &m_kv_is_addr_calls);
+   registerStatsMetric("kv-debug", getCore()->getId(), "kv-is-addr-hits", &m_kv_is_addr_hits);
+#endif
 }
 
 MemoryManager::~MemoryManager()
@@ -658,5 +684,57 @@ MemoryManager::disableModels()
    if (m_dram_cntlr_present)
       m_dram_cntlr->getDramPerfModel()->disable();
 }
+
+#if defined(ENABLE_KV_BYPASS) || defined(ENABLE_KV_PINNING)
+void
+MemoryManager::enableKVCachePolicy()
+{
+   m_kv_enable_policy_calls++;
+   s_kv_policy_active = true;
+
+#ifdef ENABLE_KV_BYPASS
+   // Enable L1-D bypass (not L1-I — KV data is never instruction-fetched)
+   if (m_cache_cntlrs[MemComponent::L1_DCACHE])
+      m_cache_cntlrs[MemComponent::L1_DCACHE]->setKVBypassEnabled(true);
+
+   // Enable L2 bypass (if an L2 exists)
+   if ((UInt32)m_last_level_cache > (UInt32)MemComponent::L2_CACHE &&
+       m_cache_cntlrs[MemComponent::L2_CACHE])
+      m_cache_cntlrs[MemComponent::L2_CACHE]->setKVBypassEnabled(true);
+#endif
+
+#ifdef ENABLE_KV_PINNING
+   // Configure KV way reservation on the LLC
+   String llc_cfgname = "perf_model/" + String(
+      m_last_level_cache == MemComponent::L2_CACHE ? "l2_cache" :
+      m_last_level_cache == MemComponent::L3_CACHE ? "l3_cache" : "l3_cache");
+   UInt32 kv_ways = 0;
+   if (Sim()->getCfg()->hasKey(llc_cfgname + "/kv_cache_reserved_ways"))
+      kv_ways = (UInt32)Sim()->getCfg()->getInt(llc_cfgname + "/kv_cache_reserved_ways");
+   if (kv_ways > 0 && m_cache_cntlrs[m_last_level_cache])
+      m_cache_cntlrs[m_last_level_cache]->configureKVWayReservation(kv_ways);
+#endif
+}
+#endif
+
+#ifdef ENABLE_KV_PINNING
+void
+MemoryManager::enableKVPinningOnly()
+{
+   m_kv_enable_pinning_only_calls++;
+   s_kv_policy_active = true;
+
+   // Pinning only: do NOT enable L1/L2 bypass.
+   // Only configure KV way reservation on the LLC.
+   String llc_cfgname = "perf_model/" + String(
+      m_last_level_cache == MemComponent::L2_CACHE ? "l2_cache" :
+      m_last_level_cache == MemComponent::L3_CACHE ? "l3_cache" : "l3_cache");
+   UInt32 kv_ways = 0;
+   if (Sim()->getCfg()->hasKey(llc_cfgname + "/kv_cache_reserved_ways"))
+      kv_ways = (UInt32)Sim()->getCfg()->getInt(llc_cfgname + "/kv_cache_reserved_ways");
+   if (kv_ways > 0 && m_cache_cntlrs[m_last_level_cache])
+      m_cache_cntlrs[m_last_level_cache]->configureKVWayReservation(kv_ways);
+}
+#endif
 
 }

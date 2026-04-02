@@ -153,7 +153,12 @@ CacheCntlr::CacheCntlr(MemComponent::component_t mem_component,
    m_shmem_perf(new ShmemPerf()),
    m_shmem_perf_global(NULL),
    m_shmem_perf_model(shmem_perf_model)
+
 {
+#ifdef ENABLE_KV_BYPASS
+   m_kv_bypass_enabled = false;
+   m_kv_bypass_count = 0;
+#endif
    m_core_id_master = m_core_id - m_core_id % m_shared_cores;
    Sim()->getStatsManager()->logTopology(name, core_id, m_core_id_master);
 
@@ -280,6 +285,9 @@ CacheCntlr::CacheCntlr(MemComponent::component_t mem_component,
       registerStatsMetric(name, core_id, "uncore-totaltime", &m_shmem_perf_totaltime);
       registerStatsMetric(name, core_id, "uncore-requests", &m_shmem_perf_numrequests);
    }
+#ifdef ENABLE_KV_BYPASS
+   registerStatsMetric(name, core_id, "kv-bypass-count", &m_kv_bypass_count);
+#endif
 }
 
 CacheCntlr::~CacheCntlr()
@@ -298,6 +306,27 @@ CacheCntlr::~CacheCntlr()
    }
    #endif
 }
+
+#ifdef ENABLE_KV_PINNING
+void
+CacheCntlr::configureKVWayReservation(UInt32 num_kv_ways)
+{
+   Cache* cache = m_master->m_cache;
+   LOG_ASSERT_ERROR(num_kv_ways < cache->getAssociativity(),
+                    "kv_cache_reserved_ways(%u) must be < associativity(%u)",
+                    num_kv_ways, cache->getAssociativity());
+   for (UInt32 s = 0; s < cache->getNumSets(); s++)
+      cache->getSet(s)->setKVReservedWays(num_kv_ways);
+}
+#endif
+
+#ifdef ENABLE_KV_BYPASS
+bool
+CacheCntlr::shouldBypassForKV(IntPtr address) const
+{
+   return m_kv_bypass_enabled && m_memory_manager->isKVCacheAddr(address);
+}
+#endif
 
 void
 CacheCntlr::setPrevCacheCntlrs(CacheCntlrList& prev_cache_cntlrs)
@@ -343,6 +372,46 @@ MYLOG("----------------------------------------------");
 MYLOG("%c%c %lx+%u..+%u", mem_op_type == Core::WRITE ? 'W' : 'R', mem_op_type == Core::READ_EX ? 'X' : ' ', ca_address, offset, data_length);
 LOG_ASSERT_ERROR((ca_address & (getCacheBlockSize() - 1)) == 0, "address at cache line + %x", ca_address & (getCacheBlockSize() - 1));
 LOG_ASSERT_ERROR(offset + data_length <= getCacheBlockSize(), "access until %u > %u", offset + data_length, getCacheBlockSize());
+
+#ifdef ENABLE_KV_BYPASS
+   // KV-cache bypass: skip this cache level entirely, delegate to next level.
+   // Data is served from the LLC without being inserted into L1/L2.
+   if (shouldBypassForKV(ca_address))
+   {
+      ++m_kv_bypass_count;
+      LOG_ASSERT_ERROR(m_next_cache_cntlr != NULL,
+                       "KV bypass enabled but no next cache level for mem_component(%u)", m_mem_component);
+      HitWhere::where_t bypass_hit = m_next_cache_cntlr->processShmemReqFromPrevCache(
+         this, mem_op_type, ca_address, modeled, count,
+         Prefetch::NONE,
+         getShmemPerfModel()->getElapsedTime(ShmemPerfModel::_USER_THREAD),
+         false);
+
+      if (bypass_hit != HitWhere::MISS)
+         return bypass_hit;
+
+      // LLC miss: a directory access was initiated.  Wait for the DRAM
+      // reply so the pending waiter is consumed here instead of waking
+      // a later, unrelated waitForNetworkThread() call.
+      waitForNetworkThread();
+      wakeUpNetworkThread();
+
+      bypass_hit = m_next_cache_cntlr->processShmemReqFromPrevCache(
+         this, mem_op_type, ca_address, false, false,
+         Prefetch::NONE,
+         getShmemPerfModel()->getElapsedTime(ShmemPerfModel::_USER_THREAD),
+         true);
+      LOG_ASSERT_ERROR(bypass_hit != HitWhere::MISS,
+         "KV bypass: data missing after DRAM reply for address 0x%lx", ca_address);
+
+      // Release the stack lock that was passed from the network thread.
+      // The normal miss path does this at line ~595; bypass must do the same
+      // or the network thread deadlocks on acquireStackLock() in handleMsgFromDramDirectory.
+      releaseStackLock(ca_address);
+
+      return bypass_hit;
+   }
+#endif
 
    #ifdef PRIVATE_L2_OPTIMIZATION
    /* if this is the second part of an atomic operation: we already have the lock, don't lock again */
@@ -787,6 +856,23 @@ CacheCntlr::processShmemReqFromPrevCache(CacheCntlr* requester, Core::mem_op_t m
    #else
    bool have_write_lock_internal = true;
    #endif
+
+#ifdef ENABLE_KV_BYPASS
+   // KV-cache bypass: skip this cache level entirely, delegate to next level
+   if (shouldBypassForKV(address))
+   {
+      ++m_kv_bypass_count;
+      LOG_ASSERT_ERROR(m_next_cache_cntlr != NULL,
+                       "KV bypass enabled but no next cache level for mem_component(%u)", m_mem_component);
+      #ifdef PRIVATE_L2_OPTIMIZATION
+      if (have_write_lock_internal && !have_write_lock)
+         releaseStackLock(address, true);
+      #endif
+      return m_next_cache_cntlr->processShmemReqFromPrevCache(
+         requester, mem_op_type, address, modeled, count,
+         isPrefetch, t_issue, have_write_lock_internal);
+   }
+#endif
 
    bool cache_hit = operationPermissibleinCache(address, mem_op_type), sibling_hit = false, prefetch_hit = false;
    bool first_hit = cache_hit;
@@ -1390,10 +1476,23 @@ MYLOG("insertCacheBlock l%d @ %lx as %c (now %c)", m_mem_component, address, CSt
 
    LOG_ASSERT_ERROR(getCacheState(address) == CacheState::INVALID, "we already have this line, can't add it again");
 
+#ifdef ENABLE_KV_PINNING
+   // Determine KV flag BEFORE insert so CacheSet::insert routes to the reserved ways
+   const bool is_kv_line = isLastLevel() && m_memory_manager->isKVCacheAddr(address);
+#else
+   const bool is_kv_line = false;
+#endif
+
    m_master->m_cache->insertSingleLine(address, data_buf,
          &eviction, &evict_address, &evict_block_info, evict_buf,
-         getShmemPerfModel()->getElapsedTime(thread_num), this);
+         getShmemPerfModel()->getElapsedTime(thread_num), this, is_kv_line);
    SharedCacheBlockInfo* cache_block_info = setCacheState(address, cstate);
+
+#ifdef ENABLE_KV_PINNING
+   // Also tag the stored block so future access checks (e.g. eviction logic) see it
+   if (is_kv_line)
+      cache_block_info->setKVCacheLine(true);
+#endif
 
    if (Sim()->getInstrumentationMode() == InstMode::CACHE_ONLY)
       cache_block_info->setOption(CacheBlockInfo::WARMUP);

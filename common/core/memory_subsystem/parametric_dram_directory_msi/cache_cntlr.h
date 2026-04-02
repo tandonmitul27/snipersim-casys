@@ -217,6 +217,12 @@ namespace ParametricDramDirectoryMSI
          bool m_prefetch_delay;
          bool m_l1_mshr;
 
+         // KV-cache bypass
+#ifdef ENABLE_KV_BYPASS
+         bool m_kv_bypass_enabled;
+         UInt64 m_kv_bypass_count;
+#endif
+
          struct {
            UInt64 loads, stores;
            UInt64 load_misses, store_misses;
@@ -398,6 +404,14 @@ namespace ParametricDramDirectoryMSI
          bool isMasterCache(void) { return m_core_id == m_core_id_master; }
          bool isFirstLevel(void) { return m_master->m_prev_cache_cntlrs.empty(); }
          bool isLastLevel(void) { return ! m_next_cache_cntlr; }
+
+#ifdef ENABLE_KV_BYPASS
+         void setKVBypassEnabled(bool v) { m_kv_bypass_enabled = v; }
+         bool shouldBypassForKV(IntPtr address) const;
+#endif
+#ifdef ENABLE_KV_PINNING
+         void configureKVWayReservation(UInt32 num_kv_ways);
+#endif
          bool isShared(core_id_t core_id); //< Return true if core shares this cache
 
          bool isInLowerLevelCache(CacheBlockInfo *block_info);

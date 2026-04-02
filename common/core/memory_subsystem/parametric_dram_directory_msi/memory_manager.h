@@ -45,6 +45,22 @@ namespace ParametricDramDirectoryMSI
          bool m_tag_directory_present;
          bool m_dram_cntlr_present;
 
+#if defined(ENABLE_KV_BYPASS) || defined(ENABLE_KV_PINNING)
+         // KV-cache policy state: GLOBAL/STATIC so all cores share the same range
+         // (set via SimMarker from one core, used by all cores)
+         static IntPtr s_kv_cache_start;
+         static size_t s_kv_cache_size;
+         static bool   s_kv_policy_active;
+
+         // Debug counters to observe KV marker flow and address tagging
+         mutable UInt64 m_kv_marker_start_calls;
+         mutable UInt64 m_kv_marker_size_calls;
+         mutable UInt64 m_kv_enable_policy_calls;
+         mutable UInt64 m_kv_enable_pinning_only_calls;
+         mutable UInt64 m_kv_is_addr_calls;
+         mutable UInt64 m_kv_is_addr_hits;
+#endif
+
          Semaphore* m_user_thread_sem;
          Semaphore* m_network_thread_sem;
 
@@ -103,6 +119,28 @@ namespace ParametricDramDirectoryMSI
 
          void enableModels();
          void disableModels();
+
+#if defined(ENABLE_KV_BYPASS) || defined(ENABLE_KV_PINNING)
+         // KV-cache policy: called from magic_server via SimMarker
+         // Uses static members so all cores see the same KV range
+         virtual void setKVCacheStart(IntPtr addr) { s_kv_cache_start = addr; m_kv_marker_start_calls++; }
+         virtual void setKVCacheSize(size_t sz)    { s_kv_cache_size  = sz;   m_kv_marker_size_calls++; }
+         virtual void enableKVCachePolicy();         // bypass + pinning
+         bool isKVCacheAddr(IntPtr addr) const
+         {
+                 m_kv_is_addr_calls++;
+                 bool hit = s_kv_policy_active &&
+                    addr >= s_kv_cache_start &&
+                    addr <  s_kv_cache_start + (IntPtr)s_kv_cache_size;
+                 if (hit) m_kv_is_addr_hits++;
+                 return hit;
+         }
+#else
+         bool isKVCacheAddr(IntPtr) const { return false; }
+#endif
+#ifdef ENABLE_KV_PINNING
+         virtual void enableKVPinningOnly();         // pinning only, no bypass
+#endif
 
          core_id_t getShmemRequester(const void* pkt_data)
          { return ((PrL1PrL2DramDirectoryMSI::ShmemMsg*) pkt_data)->getRequester(); }

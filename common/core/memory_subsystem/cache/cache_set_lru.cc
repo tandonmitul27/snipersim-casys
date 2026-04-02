@@ -24,23 +24,34 @@ CacheSetLRU::~CacheSetLRU()
 UInt32
 CacheSetLRU::getReplacementIndex(CacheCntlr *cntlr)
 {
-   // First try to find an invalid block
-   for (UInt32 i = 0; i < m_associativity; i++)
+#ifdef ENABLE_KV_PINNING
+   // Regular traffic only touches ways [kv_ways, assoc).
+   // When no KV ways are reserved, the full [0, assoc) range is used.
+   const UInt32 start = m_num_kv_reserved_ways;
+#else
+   const UInt32 start = 0;
+#endif
+
+   // First try to find an invalid block in the allowed range
+   for (UInt32 i = start; i < m_associativity; i++)
    {
       if (!m_cache_block_info_array[i]->isValid())
       {
-         // Mark our newly-inserted line as most-recently used
          moveToMRU(i);
+#ifdef ENABLE_KV_PINNING
+         if (m_set_info)
+            m_set_info->incrementRegularInsertion(i, m_num_kv_reserved_ways);
+#endif
          return i;
       }
    }
 
-   // Make m_num_attemps attempts at evicting the block at LRU position
+   // Make m_num_attempts attempts at evicting the LRU block in the allowed range
    for(UInt8 attempt = 0; attempt < m_num_attempts; ++attempt)
    {
-      UInt32 index = 0;
+      UInt32 index = start;
       UInt8 max_bits = 0;
-      for (UInt32 i = 0; i < m_associativity; i++)
+      for (UInt32 i = start; i < m_associativity; i++)
       {
          if (m_lru_bits[i] > max_bits && isValidReplacement(i))
          {
@@ -59,23 +70,63 @@ CacheSetLRU::getReplacementIndex(CacheCntlr *cntlr)
 
       if (qbs_reject)
       {
-         // Block is contained in lower-level cache, and we have more tries remaining.
-         // Move this block to MRU and try again
          moveToMRU(index);
          cntlr->incrementQBSLookupCost();
          continue;
       }
       else
       {
-         // Mark our newly-inserted line as most-recently used
          moveToMRU(index);
          m_set_info->incrementAttempt(attempt);
+#ifdef ENABLE_KV_PINNING
+         if (m_set_info)
+            m_set_info->incrementRegularInsertion(index, m_num_kv_reserved_ways);
+#endif
          return index;
       }
    }
 
    LOG_PRINT_ERROR("Should not reach here");
 }
+
+#ifdef ENABLE_KV_PINNING
+UInt32
+CacheSetLRU::getKVReplacementIndex(CacheCntlr *cntlr)
+{
+   // KV traffic only touches ways [0, kv_ways).
+   // Fall back to the full-range search when way reservation is disabled.
+   if (m_num_kv_reserved_ways == 0)
+      return getReplacementIndex(cntlr);
+
+   // First try to find an invalid block in the KV-reserved range
+   for (UInt32 i = 0; i < m_num_kv_reserved_ways; i++)
+   {
+      if (!m_cache_block_info_array[i]->isValid())
+      {
+         moveToMRU(i);
+         if (m_set_info)
+            m_set_info->incrementKVInsertion(i, m_num_kv_reserved_ways);
+         return i;
+      }
+   }
+
+   // LRU victim within KV-reserved ways only
+   UInt32 index = 0;
+   UInt8 max_bits = 0;
+   for (UInt32 i = 0; i < m_num_kv_reserved_ways; i++)
+   {
+      if (m_lru_bits[i] > max_bits)
+      {
+         index = i;
+         max_bits = m_lru_bits[i];
+      }
+   }
+   moveToMRU(index);
+   if (m_set_info)
+      m_set_info->incrementKVInsertion(index, m_num_kv_reserved_ways);
+   return index;
+}
+#endif
 
 void
 CacheSetLRU::updateReplacementIndex(UInt32 accessed_index)
@@ -98,6 +149,12 @@ CacheSetLRU::moveToMRU(UInt32 accessed_index)
 CacheSetInfoLRU::CacheSetInfoLRU(String name, String cfgname, core_id_t core_id, UInt32 associativity, UInt8 num_attempts)
    : m_associativity(associativity)
    , m_attempts(NULL)
+#ifdef ENABLE_KV_PINNING
+   , m_kv_insert_reserved(0)
+   , m_kv_insert_nonreserved(0)
+   , m_regular_insert_reserved(0)
+   , m_regular_insert_nonreserved(0)
+#endif
 {
    m_access = new UInt64[m_associativity];
    for(UInt32 i = 0; i < m_associativity; ++i)
@@ -115,6 +172,13 @@ CacheSetInfoLRU::CacheSetInfoLRU(String name, String cfgname, core_id_t core_id,
          registerStatsMetric(name, core_id, String("qbs-attempt-")+itostr(i), &m_attempts[i]);
       }
    }
+
+#ifdef ENABLE_KV_PINNING
+   registerStatsMetric(name, core_id, "pinning-kv-insert-reserved", &m_kv_insert_reserved);
+   registerStatsMetric(name, core_id, "pinning-kv-insert-nonreserved", &m_kv_insert_nonreserved);
+   registerStatsMetric(name, core_id, "pinning-regular-insert-reserved", &m_regular_insert_reserved);
+   registerStatsMetric(name, core_id, "pinning-regular-insert-nonreserved", &m_regular_insert_nonreserved);
+#endif
 };
 
 CacheSetInfoLRU::~CacheSetInfoLRU()

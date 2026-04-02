@@ -182,6 +182,133 @@ SDE's recorder tool segfaults during cleanup after the app exits. This is a know
 PIN bug and does **not** affect simulation results — all traces are already sent to
 Sniper before this happens.
 
+---
+
+## KV Cache Bypass and LLC Way Pinning
+
+Two cache management policies were added to SniperSim to model hardware-assisted
+KV cache optimization for transformer inference workloads.
+
+### Concept
+
+During transformer decode, the KV cache is read every token but rarely written.
+On a standard cache hierarchy, interference from weight/activation traffic can
+evict KV cache lines, causing expensive DRAM re-fetches.
+
+- **L1/L2 Bypass**: KV cache reads skip L1 and L2, going directly to the LLC.
+  This prevents KV data from polluting the small inner caches that are more useful
+  for the hot working set (weights, activations, loop variables).
+
+- **LLC Way Pinning**: A configurable number of LLC ways are *reserved* for KV
+  cache lines. Regular (non-KV) data can only use the remaining ways. This
+  protects KV data from eviction by the much larger weight/activation traffic.
+
+### How It Works
+
+#### Compile-time flags (`common/Makefile.common`)
+Both are enabled by default:
+```makefile
+ENABLE_KV_BYPASS  ?= 1    # -DENABLE_KV_BYPASS
+ENABLE_KV_PINNING ?= 1    # -DENABLE_KV_PINNING
+```
+These guard the code paths but do NOT activate the policies. Activation happens
+at runtime via SimMarker magic instructions.
+
+#### Runtime activation (SimMarker protocol)
+The application announces the KV cache buffer's address range using two pairs of
+magic instructions:
+
+| Marker pair | Calls | Effect |
+|---|---|---|
+| `SimMarker(0xBEEF0001, addr)` + `SimMarker(0xBEEF0002, size)` | `enableKVCachePolicy()` | Activates both bypass and pinning |
+| `SimMarker(0xBEEF0003, addr)` + `SimMarker(0xBEEF0004, size)` | `enableKVPinningOnly()` | Activates pinning only (no bypass) |
+
+To get bypass-only, use the `0xBEEF0001/0002` pair and set
+`kv_cache_reserved_ways=0` in the config.
+
+#### Config parameter (`config/skylake.cfg`)
+```ini
+[perf_model/l3_cache]
+kv_cache_reserved_ways = 8   # ways reserved for KV lines (out of 16-way LLC)
+```
+
+#### Key files modified
+| File | Changes |
+|---|---|
+| `common/system/magic_server.cc` | SimMarker handling; VA-to-PA translation of KV start address |
+| `common/core/memory_subsystem/parametric_dram_directory_msi/cache_cntlr.cc` | Bypass logic in `processMemOpFromCore` and `processShmemReqFromPrevCache`; LLC miss handling with stack lock management |
+| `common/core/memory_subsystem/parametric_dram_directory_msi/cache_cntlr.h` | `m_kv_bypass` flag, `shouldBypassForKV()`, bypass counter |
+| `common/core/memory_subsystem/parametric_dram_directory_msi/memory_manager.cc` | `enableKVCachePolicy()`, `enableKVPinningOnly()`, `isKVCacheAddr()`, debug stats |
+| `common/core/memory_subsystem/parametric_dram_directory_msi/memory_manager.h` | Static KV range tracking (`s_kv_cache_start`, `s_kv_cache_size`, `s_kv_policy_active`) |
+| `common/core/memory_subsystem/cache/cache_set.h` | `m_num_kv_reserved_ways`, `getKVReplacementIndex()` |
+| `common/core/memory_subsystem/cache/cache_set_lru.cc` | Way-partitioned LRU replacement: KV lines routed to reserved ways, regular lines restricted to non-reserved ways |
+| `common/core/memory_subsystem/cache/cache_block_info.h` | `m_is_kv_cache_line` flag, `isKVCacheLine()` / `setKVCacheLine()` |
+
+### Stats to check
+
+| Stat | Meaning |
+|---|---|
+| `L1-D[0].kv-bypass-count` | Number of L1-D accesses that bypassed to the next level |
+| `L2[0].kv-bypass-count` | Number of L2 accesses that bypassed to L3 |
+| `L3[0].pinning-kv-insert-reserved` | KV lines inserted into reserved LLC ways |
+| `L3[0].pinning-regular-insert-nonreserved` | Regular lines inserted into non-reserved LLC ways |
+| `L3[0].access-mru-15` | Hits in way position 15 (reserved way) — high value confirms pinning |
+| `kv-debug[0].kv-is-addr-hits` | Times `isKVCacheAddr()` returned true during LLC insertion |
+
+---
+
+## KV Cache Test (`test/kv/`)
+
+A standalone microbenchmark that validates the bypass and pinning mechanisms in
+isolation, without the complexity of the full transformer benchmark.
+
+### Test design
+
+`test/kv/kv_test.c` allocates two buffers:
+- **KV buffer** (2 MB): simulates the KV cache, announced to the simulator via SimMarker
+- **Interference buffer** (20 MB): simulates weight/activation traffic that competes for LLC space
+
+The combined working set (22 MB) exceeds the 16 MB LLC, creating the eviction
+pressure needed to demonstrate pinning benefits. Inside the ROI, the test
+alternates 8 passes over both buffers at cache-line stride.
+
+### Running the tests
+
+```bash
+cd test/kv
+env -i HOME=$HOME PATH=/usr/bin:/bin:/usr/local/bin make run-all
+```
+
+Individual targets:
+```bash
+make run-baseline         # no KV policy
+make run-bypass           # L1/L2 bypass only (kv_cache_reserved_ways=0)
+make run-pinning          # LLC way pinning only
+make run-bypass-pinning   # both bypass and pinning
+```
+
+### Results (16 MB LLC, 16-way, 8 reserved ways for pinning)
+
+| Metric | Baseline | Bypass | Pinning | Bypass+Pinning |
+|---|---|---|---|---|
+| Speedup vs baseline | 1.00x | 1.02x | 1.06x | 1.06x |
+| L1-D kv-bypass-count | 0 | 262,136 | 0 | 262,136 |
+| L3 load-misses | 2,883,823 | 2,883,824 | 2,392,305 | 2,392,305 |
+| L3 KV inserts (reserved) | 0 | 0 | 32,767 | 32,767 |
+| DRAM reads | 3,244,280 | 3,244,282 | 2,752,762 | 2,752,763 |
+
+**Key observations:**
+- **Bypass** reduces L1/L2 pollution (262K fewer L1-D evictions) but does not
+  reduce DRAM traffic — without pinning, KV lines are still evicted from LLC by
+  the 20 MB interference buffer.
+- **Pinning** eliminates ~491K DRAM reads by protecting KV lines in reserved LLC
+  ways. This is the dominant performance win (~6% speedup).
+- **Bypass+Pinning** composes correctly: L2 bypass count drops from 524K to 295K
+  because pinned KV lines now hit in LLC on the first try, avoiding the DRAM
+  retry path.
+
+---
+
 ### Must run without conda
 The conda environment sets library paths that conflict with SDE. The wrapper script
 handles this automatically via `env -i`. If running `run-sniper` directly, prefix

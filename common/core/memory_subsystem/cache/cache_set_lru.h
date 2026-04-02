@@ -20,10 +20,33 @@ class CacheSetInfoLRU : public CacheSetInfo
          else
             LOG_ASSERT_ERROR(attempt == 0, "No place to store attempt# histogram but attempt != 0");
       }
+#ifdef ENABLE_KV_PINNING
+      void incrementKVInsertion(UInt32 index, UInt32 num_kv_reserved_ways)
+      {
+         if (index < num_kv_reserved_ways)
+            ++m_kv_insert_reserved;
+         else
+            ++m_kv_insert_nonreserved;
+      }
+
+      void incrementRegularInsertion(UInt32 index, UInt32 num_kv_reserved_ways)
+      {
+         if (index < num_kv_reserved_ways)
+            ++m_regular_insert_reserved;
+         else
+            ++m_regular_insert_nonreserved;
+      }
+#endif
    private:
       const UInt32 m_associativity;
       UInt64* m_access;
       UInt64* m_attempts;
+#ifdef ENABLE_KV_PINNING
+      UInt64 m_kv_insert_reserved;
+      UInt64 m_kv_insert_nonreserved;
+      UInt64 m_regular_insert_reserved;
+      UInt64 m_regular_insert_nonreserved;
+#endif
 };
 
 class CacheSetLRU : public CacheSet
@@ -34,6 +57,9 @@ class CacheSetLRU : public CacheSet
       virtual ~CacheSetLRU();
 
       virtual UInt32 getReplacementIndex(CacheCntlr *cntlr);
+#ifdef ENABLE_KV_PINNING
+      virtual UInt32 getKVReplacementIndex(CacheCntlr *cntlr);
+#endif
       void updateReplacementIndex(UInt32 accessed_index);
 
    protected:
