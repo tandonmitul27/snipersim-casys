@@ -12,6 +12,10 @@
 #include "timer.h"
 #include "thread.h"
 #include "memory_manager_base.h"
+#include "shmem_perf_model.h"
+#ifdef ENABLE_SCRATCHPAD
+#include "scratchpad_memory.h"
+#endif
 
 MagicServer::MagicServer()
       : m_performance_enabled(false)
@@ -121,6 +125,71 @@ UInt64 MagicServer::Magic_unlocked(thread_id_t thread_id, core_id_t core_id, UIn
 #endif
          }
 #endif
+
+#ifdef ENABLE_SCRATCHPAD
+         // Scratchpad memory markers: 0x5FAD0001 - 0x5FAD00FF
+         if ((arg0 & 0xFFFFFF00) == 0x5FAD0000)
+         {
+            Core *core = Sim()->getCoreManager()->getCoreFromID(core_id);
+            MemoryManagerBase *mm = core->getMemoryManager();
+            ScratchpadMemory *spm = mm->getScratchpad();
+
+            if (spm != NULL)
+            {
+               switch (arg0)
+               {
+               case 0x5FAD0001:  // SPM_INIT: arg1 = size in bytes
+                  spm->init((UInt32)arg1);
+                  break;
+
+               case 0x5FAD0002:  // SPM_MAP: arg1 = virtual address of mmap'd region
+               {
+                  Thread *t = Sim()->getThreadManager()->getThreadFromID(thread_id);
+                  IntPtr pa = (IntPtr)t->va2pa((UInt64)arg1);
+                  spm->setMappedBase(pa);
+                  break;
+               }
+
+               case 0x5FAD0010:  // DMA_LOAD_ADDR: arg1 = DRAM source vaddr
+                  spm->setDmaSourceAddr(arg1);
+                  break;
+
+               case 0x5FAD0011:  // DMA_LOAD_EXEC: arg1 = (spm_offset << 32) | size
+               {
+                  UInt32 spm_offset = (UInt32)(arg1 >> 32);
+                  UInt32 size = (UInt32)(arg1 & 0xFFFFFFFF);
+                  SubsecondTime now = core->getPerformanceModel()->getElapsedTime();
+                  SubsecondTime lat = spm->dmaLoad(core_id, spm_offset, size, now);
+                  core->getShmemPerfModel()->incrElapsedTime(lat, ShmemPerfModel::_USER_THREAD);
+                  break;
+               }
+
+               case 0x5FAD0020:  // DMA_STORE_ADDR: arg1 = DRAM dest vaddr
+                  spm->setDmaDestAddr(arg1);
+                  break;
+
+               case 0x5FAD0021:  // DMA_STORE_EXEC: arg1 = (spm_offset << 32) | size
+               {
+                  UInt32 spm_offset = (UInt32)(arg1 >> 32);
+                  UInt32 size = (UInt32)(arg1 & 0xFFFFFFFF);
+                  SubsecondTime now = core->getPerformanceModel()->getElapsedTime();
+                  SubsecondTime lat = spm->dmaStore(core_id, spm_offset, size, now);
+                  core->getShmemPerfModel()->incrElapsedTime(lat, ShmemPerfModel::_USER_THREAD);
+                  break;
+               }
+
+               case 0x5FAD00FF:  // SPM_FREE
+                  spm->free();
+                  break;
+
+               default:
+                  LOG_PRINT_WARNING("Unknown scratchpad marker: 0x%lx", arg0);
+                  break;
+               }
+            }
+         }
+#endif
+
          MagicMarkerType args = { thread_id: thread_id, core_id: core_id, arg0: arg0, arg1: arg1, str: NULL };
          Sim()->getHooksManager()->callHooks(HookType::HOOK_MAGIC_MARKER, (UInt64)&args);
          return 0;

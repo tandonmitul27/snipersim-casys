@@ -8,6 +8,10 @@
 #include "shmem_perf_model.h"
 #include "pr_l1_pr_l2_dram_directory_msi/shmem_msg.h"
 
+#ifdef ENABLE_SCRATCHPAD
+class ScratchpadMemory;
+#endif
+
 void MemoryManagerNetworkCallback(void* obj, NetPacket packet);
 
 class MemoryManagerBase
@@ -93,6 +97,10 @@ class MemoryManagerBase
 #endif
 #ifdef ENABLE_KV_PINNING
       virtual void enableKVPinningOnly() {}   // pinning only, no bypass
+#endif
+
+#ifdef ENABLE_SCRATCHPAD
+      virtual ScratchpadMemory* getScratchpad() { return NULL; }
 #endif
 
       // Modeling

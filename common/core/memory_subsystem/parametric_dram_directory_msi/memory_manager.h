@@ -14,6 +14,10 @@
 #include "shared_cache_block_info.h"
 #include "subsecond_time.h"
 
+#ifdef ENABLE_SCRATCHPAD
+#include "scratchpad_memory.h"
+#endif
+
 #include <map>
 
 class DramCache;
@@ -59,6 +63,11 @@ namespace ParametricDramDirectoryMSI
          mutable UInt64 m_kv_enable_pinning_only_calls;
          mutable UInt64 m_kv_is_addr_calls;
          mutable UInt64 m_kv_is_addr_hits;
+#endif
+
+#ifdef ENABLE_SCRATCHPAD
+         ScratchpadMemory *m_scratchpad;
+         static ScratchpadMemory *s_shared_scratchpad;
 #endif
 
          Semaphore* m_user_thread_sem;
@@ -140,6 +149,10 @@ namespace ParametricDramDirectoryMSI
 #endif
 #ifdef ENABLE_KV_PINNING
          virtual void enableKVPinningOnly();         // pinning only, no bypass
+#endif
+
+#ifdef ENABLE_SCRATCHPAD
+         virtual ScratchpadMemory* getScratchpad() { return m_scratchpad; }
 #endif
 
          core_id_t getShmemRequester(const void* pkt_data)

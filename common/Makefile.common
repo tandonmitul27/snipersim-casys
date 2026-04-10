@@ -41,13 +41,19 @@ endif
 # KV-cache features: set to 0 to compile out individually.
 # ENABLE_KV_BYPASS  = L1/L2 cache bypass for KV-cache addresses
 # ENABLE_KV_PINNING = LLC way reservation/pinning for KV-cache lines
-ENABLE_KV_BYPASS ?= 1
-ENABLE_KV_PINNING ?= 1
+ENABLE_KV_BYPASS ?= 0
+ENABLE_KV_PINNING ?= 0
 ifeq ($(ENABLE_KV_BYPASS),1)
 CXXFLAGS += -DENABLE_KV_BYPASS
 endif
 ifeq ($(ENABLE_KV_PINNING),1)
 CXXFLAGS += -DENABLE_KV_PINNING
+endif
+
+# Scratchpad memory: software-managed on-chip SRAM decoupled from cache hierarchy
+ENABLE_SCRATCHPAD ?= 0
+ifeq ($(ENABLE_SCRATCHPAD),1)
+CXXFLAGS += -DENABLE_SCRATCHPAD
 endif
 
 include $(SIM_ROOT)/Makefile.config

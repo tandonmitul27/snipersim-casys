@@ -39,6 +39,10 @@ size_t MemoryManager::s_kv_cache_size  = 0;
 bool   MemoryManager::s_kv_policy_active = false;
 #endif
 
+#ifdef ENABLE_SCRATCHPAD
+ScratchpadMemory* MemoryManager::s_shared_scratchpad = NULL;
+#endif
+
 MemoryManager::MemoryManager(Core* core,
       Network* network, ShmemPerfModel* shmem_perf_model):
    MemoryManagerBase(core, network, shmem_perf_model),
@@ -52,6 +56,9 @@ MemoryManager::MemoryManager(Core* core,
    m_tag_directory_present(false),
    m_dram_cntlr_present(false),
    m_enabled(false)
+#ifdef ENABLE_SCRATCHPAD
+   , m_scratchpad(NULL)
+#endif
 #if defined(ENABLE_KV_BYPASS) || defined(ENABLE_KV_PINNING)
    , m_kv_marker_start_calls(0)
    , m_kv_marker_size_calls(0)
@@ -399,6 +406,48 @@ MemoryManager::MemoryManager(Core* core,
    registerStatsMetric("kv-debug", getCore()->getId(), "kv-is-addr-calls", &m_kv_is_addr_calls);
    registerStatsMetric("kv-debug", getCore()->getId(), "kv-is-addr-hits", &m_kv_is_addr_hits);
 #endif
+
+#ifdef ENABLE_SCRATCHPAD
+   bool spm_enabled = Sim()->getCfg()->getBool("perf_model/scratchpad/enabled");
+   if (spm_enabled)
+   {
+      bool spm_shared = Sim()->getCfg()->getBool("perf_model/scratchpad/shared");
+      UInt32 num_cores = Sim()->getConfig()->getApplicationCores();
+
+      if (spm_shared)
+      {
+         // Shared mode: first core creates the instance, others reuse it
+         if (s_shared_scratchpad == NULL)
+         {
+            s_shared_scratchpad = new ScratchpadMemory(
+               global_domain,
+               Sim()->getCfg()->getInt("perf_model/scratchpad/size"),
+               Sim()->getCfg()->getInt("perf_model/scratchpad/access_latency"),
+               Sim()->getCfg()->getInt("perf_model/scratchpad/dma_bandwidth"),
+               Sim()->getCfg()->getInt("perf_model/scratchpad/dma_startup_overhead"),
+               /*shared=*/true,
+               Sim()->getCfg()->getInt("perf_model/scratchpad/num_ports"),
+               num_cores);
+         }
+         m_scratchpad = s_shared_scratchpad;
+      }
+      else
+      {
+         // Private mode: each core gets its own instance
+         m_scratchpad = new ScratchpadMemory(
+            core->getDvfsDomain(),
+            Sim()->getCfg()->getInt("perf_model/scratchpad/size"),
+            Sim()->getCfg()->getInt("perf_model/scratchpad/access_latency"),
+            Sim()->getCfg()->getInt("perf_model/scratchpad/dma_bandwidth"),
+            Sim()->getCfg()->getInt("perf_model/scratchpad/dma_startup_overhead"),
+            /*shared=*/false,
+            /*num_ports=*/1,
+            num_cores);
+      }
+
+      m_scratchpad->registerStats(getCore()->getId());
+   }
+#endif
 }
 
 MemoryManager::~MemoryManager()
@@ -438,6 +487,13 @@ MemoryManager::~MemoryManager()
       delete m_dram_cntlr;
    if (m_dram_directory_cntlr)
       delete m_dram_directory_cntlr;
+
+#ifdef ENABLE_SCRATCHPAD
+   if (m_scratchpad && !m_scratchpad->isShared())
+      delete m_scratchpad;
+   // Shared scratchpad is leaked intentionally — it outlives all cores.
+   // Could add a static cleanup, but Sniper exits after simulation anyway.
+#endif
 }
 
 HitWhere::where_t
@@ -451,6 +507,22 @@ MemoryManager::coreInitiateMemoryAccess(
 {
    LOG_ASSERT_ERROR(mem_component <= m_last_level_cache,
       "Error: invalid mem_component (%d) for coreInitiateMemoryAccess", mem_component);
+
+#ifdef ENABLE_SCRATCHPAD
+   // Intercept SPM-mapped addresses BEFORE TLB/cache hierarchy
+   if (m_scratchpad && m_scratchpad->isInitialized()
+       && mem_component == MemComponent::L1_DCACHE
+       && m_scratchpad->isMappedAddress(address))
+   {
+      bool is_write = (mem_op_type == Core::WRITE || mem_op_type == Core::READ_EX);
+      SubsecondTime now = getShmemPerfModel()->getElapsedTime(ShmemPerfModel::_USER_THREAD);
+      SubsecondTime latency = m_scratchpad->access(
+         getCore()->getId(), m_scratchpad->toOffset(address),
+         data_length, is_write, now);
+      getShmemPerfModel()->incrElapsedTime(latency, ShmemPerfModel::_USER_THREAD);
+      return HitWhere::SCRATCHPAD;
+   }
+#endif
 
    if (mem_component == MemComponent::L1_ICACHE && m_itlb)
       accessTLB(m_itlb, address, true, modeled);
