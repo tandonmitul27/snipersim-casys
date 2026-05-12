@@ -77,3 +77,6 @@ frontend/pin-frontend/sift/*.h
 frontend/pin-frontend/sift/*.cc
 sift/recorder/sift/*.h
 sift/recorder/sift/*.cc
+
+# nested local benchmark repo (cloned separately at workspace/transformer-benchmark)
+/transformer-benchmark/

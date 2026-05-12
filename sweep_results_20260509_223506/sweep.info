@@ -1,0 +1,17 @@
+[sweep] dir=sweep_results_20260509_223506  threads={1 2 4 8 16 32}  host_cores_per_job=8
+[sweep] start: 2026-05-09T22:35:06+00:00
+[sweep] launched threads=1 pid=3063455  log=sweep_results_20260509_223506/logs/threads_1.log  outdir=sweep_results_20260509_223506/threads_1
+[sweep] launched threads=2 pid=3063462  log=sweep_results_20260509_223506/logs/threads_2.log  outdir=sweep_results_20260509_223506/threads_2
+[sweep] launched threads=4 pid=3063468  log=sweep_results_20260509_223506/logs/threads_4.log  outdir=sweep_results_20260509_223506/threads_4
+[sweep] launched threads=8 pid=3063476  log=sweep_results_20260509_223506/logs/threads_8.log  outdir=sweep_results_20260509_223506/threads_8
+[sweep] launched threads=16 pid=3063482  log=sweep_results_20260509_223506/logs/threads_16.log  outdir=sweep_results_20260509_223506/threads_16
+[sweep] launched threads=32 pid=3063490  log=sweep_results_20260509_223506/logs/threads_32.log  outdir=sweep_results_20260509_223506/threads_32
+[sweep] all jobs finished: 2026-05-09T22:57:48+00:00
+
+=== Summary ===
+threads=1  exit=0  IPC(core0)=2.77  RuntimeDynamic=79.4818 W
+threads=2  exit=0  IPC(core0)=2.47  RuntimeDynamic=125.07 W
+threads=4  exit=0  IPC(core0)=2.15  RuntimeDynamic=183.535 W
+threads=8  exit=0  IPC(core0)=1.85  RuntimeDynamic=251.696 W
+threads=16  exit=0  IPC(core0)=1.61  RuntimeDynamic=335.542 W
+threads=32  exit=0  IPC(core0)=2.30  RuntimeDynamic=321.255 W
